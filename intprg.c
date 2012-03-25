@@ -27,6 +27,7 @@ volatile unsigned char timer_a_count=0;
 volatile unsigned char sec=0;
 volatile unsigned char halfsec=0;
 volatile unsigned char serial1_message=0;
+volatile unsigned char magnet_ready=0;
 // When you want to use BANK1 registers
 // please define interrupt using /B swtich as follows.
 //
@@ -130,7 +131,10 @@ void _timer_rb(void){}
 
 // int1				(software int 25)
 #pragma interrupt	_int1(vect=25)
-void _int1(void){}
+void _int1(void)
+{
+    magnet_ready = 1;
+}
 
 // int3				(software int 26)
 #pragma interrupt	_int3(vect=26)
