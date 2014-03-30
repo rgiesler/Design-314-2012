@@ -25,4 +25,5 @@ void serial_transmit(char message [])
 { int i = 0;
   while(0 != message[i])
     serial_byte_transmit(message[i++]);  // send message  
+  serial_byte_transmit(0);
 }
