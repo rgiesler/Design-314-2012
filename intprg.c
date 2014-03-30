@@ -27,7 +27,11 @@ volatile unsigned char timer_a_count=0;
 volatile unsigned char sec=0;
 volatile unsigned char halfsec=0;
 volatile unsigned char serial1_message=0;
+volatile unsigned char serial1_message_ready=0;
 volatile unsigned char magnet_ready=0;
+volatile unsigned int distance_recieved=0;
+volatile unsigned char top_button=0;
+volatile unsigned char bottom_button=0;
 // When you want to use BANK1 registers
 // please define interrupt using /B swtich as follows.
 //
@@ -62,7 +66,21 @@ void _timer_re(void){}
 
 // input_key			(software int 13)
 #pragma interrupt	_input_key(vect=13)
-void _input_key(void){}
+void _input_key(void){
+  unsigned int i;
+  if(0==p1_0)           //check which button and set flags
+  {
+    top_button = 1;
+    while(0==p1_0);     //wait for button release
+  }
+  else if(0 == p1_1)
+  {
+    bottom_button = 1;
+    while(0==p1_1);     //wait for button release
+  }
+  //loop for button filtering
+  for(i = 0; i<100; i++);
+  }
 
 // A-D converter		(software int 14)
 #pragma interrupt	_ad_converter(vect=14)
@@ -102,6 +120,7 @@ void _uart1_trance(void){}
 void _uart1_receive(void)
 { serial1_message=u1rbh;
   serial1_message=u1rbl;
+  serial1_message_ready = 1;
 }
 
 // vector 21 reserved
@@ -138,7 +157,11 @@ void _int1(void)
 
 // int3				(software int 26)
 #pragma interrupt	_int3(vect=26)
-void _int3(void){}
+void _int3(void){
+	int i;
+	distance_recieved++;
+	for(i = 0; i < 1500; i++);
+	}
 
 // vector 27 reserved
 // vector 28 reserved

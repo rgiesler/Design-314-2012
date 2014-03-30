@@ -1,0 +1,1 @@
+void timer_a_init(void);

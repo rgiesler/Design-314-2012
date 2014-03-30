@@ -1,0 +1,1 @@
+motor_init(int speed);

@@ -1,4 +1,6 @@
 #include "sfr_r827.h"
+#include "math.h"
+#define PI 3.1415926536
 
 char magnet_read (char eeprom_adres, int *x, int *y, int *z)
 {
@@ -217,4 +219,38 @@ void format_text (int mag, char *temp)   //Custom function because sprintf takes
             temp[i++] = temp2[j];
         
     temp [i] = 0;            //add null terminator
+}
+
+double get_angle (double mag_x_def, double mag_y_def)
+{
+  double mag_angle;
+  double tan_arg;
+  
+  if(mag_x_def < 0.1 && mag_x_def > -0.1)
+    mag_x_def = 0.1;
+  if(mag_y_def < 0.1 && mag_y_def > -0.1)
+    mag_y_def = 0.1;
+  tan_arg = mag_y_def/mag_x_def; 
+  
+        tan_arg = mag_y_def/mag_x_def; 
+        if (tan_arg <= 1 && tan_arg >= -1) 
+        { 
+          mag_angle = atan(tan_arg)*180/PI;
+        }
+        else
+        {
+          tan_arg = mag_x_def/mag_y_def;
+          if (tan_arg >= 0)
+            mag_angle = 90 - atan(tan_arg)*180/PI;
+          else mag_angle = -90 - atan(tan_arg)*180/PI; 
+        }        
+        if(mag_x_def > 0)
+        {
+          if(mag_y_def>0)
+            mag_angle = mag_angle - 180;
+          else
+            mag_angle = mag_angle + 180;
+        }
+        
+   return mag_angle;
 }

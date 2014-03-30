@@ -15,12 +15,27 @@
 #include "lcd.h"
 #include "eeprom.h"
 #include "magnet.h"
+#include "distance.h"
+#include "servo.h"
+#include "motor.h"
+#include "buttons.h"
+#include "math.h"
+
+#define STOP 0         //define modes for state machine
+#define RUN 1
+#define CALIBRATE 2
+#define DATA 3
+#define PI 3.1415926536
 
 void clock_init(void);
 extern volatile unsigned char sec;
 extern volatile unsigned char halfsec;
 extern volatile unsigned char serial1_message;
+extern volatile unsigned char serial1_message_ready;
 extern volatile unsigned char magnet_ready;
+extern volatile unsigned int distance_recieved;
+extern volatile unsigned char top_button;
+extern volatile unsigned char bottom_button;
 volatile signed int mag_x[8] = {0};
 volatile signed int mag_y[8] = {0};
 volatile signed int mag_x_temp = 0;
@@ -29,12 +44,28 @@ volatile signed int mag_x_tot = 0;
 volatile signed int mag_y_tot = 0;
 volatile signed int mag_z_temp = 0;
 volatile signed int mag_count = 0;
-volatile unsigned char storage_position = 0;
-unsigned int eeprom_addres_count = 0;
+volatile signed int mag_x_max = -32767;
+volatile signed int mag_y_max = -32767;
+volatile signed int mag_x_min = 32767;
+volatile signed int mag_y_min = 32767;
+volatile signed int mag_x_offset = 0;
+volatile signed int mag_y_offset = 0;
+volatile double mag_x_def = 0;
+volatile double mag_y_def = 0;
+volatile double mag_angle = 0;
+volatile double tan_arg = 0;
+volatile signed int ref_angle = 0;
+volatile unsigned int calibrate_counter = 0;
+volatile unsigned int required_distance = 0;
 int i;
-char c;
 char temp[9];
-volatile unsigned char storage [100] = {0};
+char temp1;
+char temp2;
+volatile unsigned char buffer [100] = {0};
+volatile unsigned char buffer_pos = 0;
+volatile char mode = STOP;
+volatile int eeprom_pos = 4;
+
 
 /*  This is the main program loop  */
 void main(void)
@@ -46,81 +77,293 @@ void main(void)
   lcd_clear();
   i2c_init();
   magnet_initialise();
-    
+  distance_init();
+  servo_init();
+  buttons_init();
+  
+  //get magnet offset values from eeprom
+  while(0==eeprom_lees(0x50, 0, &temp1));
+  while(0==eeprom_lees(0x50, 1, &temp2));
+  mag_x_offset = temp1*(0xFF+1) + temp2;
+  while(0==eeprom_lees(0x50, 2, &temp1));
+  while(0==eeprom_lees(0x50, 3, &temp2));
+  mag_y_offset = temp1*(0xFF+1) + temp2;
+  
   while(1)
-  { // LED flasher
+  { // LED flasher (shows that main loop is still running)
     if(0 == sec%2)
       p1_3=1;
     else
       p1_3 = 0;
-      
-    //magnet sensor display
-    if(magnet_ready)
-    {
-        magnet_ready = 0;       //reset interrupt flag
-        //read the magnet data
-        while(0 == magnet_read (0x0E, &mag_x_temp, &mag_y_temp, &mag_z_temp));
-        mag_x_tot -= mag_x[mag_count];      //subtract last value from average
-        mag_x[mag_count] = mag_x_temp/8;    //set new value
-        mag_x_tot += mag_x[mag_count];      //add new value to average
-        mag_y_tot -= mag_y[mag_count];
-        mag_y[mag_count] = mag_y_temp/8;
-        mag_y_tot += mag_y[mag_count];
-        mag_count = (mag_count+1)%8;        // ring buffer counter increment
+    
 
-        format_text(mag_x_tot, temp); //display x results to top line of LCD
-        lcd_display_top(temp);
-        format_text(mag_y_tot, temp); //display y results to bottom line of LCD
-        lcd_display_bottom(temp);
+    //button management  
+    if(top_button == 1)             //switch to calibrate mode
+    {
+      mode = CALIBRATE;
+      calibrate_counter = 0;
+      lcd_display_top("Calib...");
+      top_button = 0;
+      servo_direction(20);    //set direction for calib
+      pd5_4 = 1;              //start motor for calib
+      p5_4 = 0;               //motor direction forward
+      motor_init(99);
+      distance_recieved = 0;
     }
-		
-	// scroll LCD
-	if(1 == halfsec)
-	{ lcd_scroll();
-	  halfsec=0;
-	}
-	 
-	// receive serial message, process it using switch case
-	if(0x00 != serial1_message)
-	{ 
-      switch (serial1_message) 
+
+    if(bottom_button == 1)        //switch to run mode
+    {
+      mode = RUN;
+      lcd_display_top("Running.");
+      lcd_display_bottom("");
+      bottom_button = 0;
+      required_distance = 0;
+      distance_recieved = 1;
+    }
+
+    //magnet data
+    if (magnet_ready==1)
+    {
+      magnet_ready = 0;
+      //read the magnet data
+      magnet_read (0x0E, &mag_x_temp, &mag_y_temp, &mag_z_temp);
+
+      //ring buffer
+      mag_x_tot -= mag_x[mag_count];      //subtract last value from average
+      mag_x[mag_count] = mag_x_temp/8;    //set new value
+      mag_x_tot += mag_x[mag_count];      //add new value to average
+      mag_y_tot -= mag_y[mag_count];
+      mag_y[mag_count] = mag_y_temp/8;
+      mag_y_tot += mag_y[mag_count];
+      mag_count = (mag_count+1)%8;        // ring buffer counter increment
+     
+
+      if(mode == RUN)       //adjust servo angle
       {
-      case 0x84:                        // eeprom message recieved
-        for(i = 0; i< eeprom_addres_count; i++)
-            while(0==eeprom_skryf(0x50, i, storage[i]));
-        while(0==eeprom_skryf(0x50, eeprom_addres_count, 0));
-	    eeprom_addres_count=0;
-      break;
-      
-      case 0x85:                        // tramsit eeprom data through serial
-        eeprom_addres_count=0;
-        do {
-            while(0==eeprom_lees(0x50, eeprom_addres_count, &c));
-            eeprom_addres_count++;
-            serial_byte_transmit(c);
+        //work out angle
+        mag_x_def = mag_x_tot - mag_x_offset;
+        mag_y_def = mag_y_tot - mag_y_offset;
+        tan_arg = mag_y_def/mag_x_def; 
+        mag_angle = get_angle(mag_x_def, mag_y_def);
+        //logic for determining quickest way to get to angle        
+        if(mag_angle<0&&ref_angle>90)
+          mag_angle = -(ref_angle + mag_angle) + 60;
+        else if(ref_angle<=-90 && mag_angle > 90)
+          mag_angle = mag_angle - ref_angle + 60;
+        else
+          mag_angle = ref_angle-mag_angle + 60;
+        //adjust angle for obstacle sensors
+        pd5_3 = 1;
+        p5_3 = 1;			    	//enable obstable sensors
+                            //set directions for sensors
+        prc2 = 1;           //disable LCD
+        pd0_6 = 1;
+        p0_6 = 0;   
+        prc2 = 1;
+        pd0 = pd0&0xF0;
+        if(p0_2 == 0)       //left obstable
+        {
+          mag_angle = 90;
+          servo_init(90);
         }
-        while (0 != c);
-        eeprom_addres_count = 0;
-      break;
-      
-      case 0x86:                            //transmit x magnetic data through serial
-      case 0x87:
-        format_text(mag_x_tot, temp);   //format data
-        serial_transmit(temp);              //transmit
-      break;
-      
-      case 0x88:
-      case 0x89:
-        format_text(mag_y_tot, temp);   //format data
-        serial_transmit(temp);              //transmit
-      break;
-	 
-      default:	                        // add byte to eeprom
-	    storage[eeprom_addres_count++] = serial1_message;
-      break;
+        else if(p0_1 == 0)  //right obstacle
+        {
+          mag_angle = 30;
+          servo_init(30);
+        }
+        if(p0_0 == 0 || p0_3 == 0)    //front or rear obstacles
+        {
+          mode = STOP;
+          lcd_display_top("Obs Stop");
+          motor_init(0);
+          servo_direction(60);
+        }
+        //set servo direction to get correct angle
+        if(p5_4 == 0)   //only if we're going forwards
+          servo_direction ((int)mag_angle);
       }
-	  serial1_message = 0;
+
+      //calibration mode
+      if(mode == CALIBRATE)
+      {
+        //find max/min
+        if(mag_x_temp < mag_x_min)
+          mag_x_min = mag_x_temp;
+        if(mag_x_temp > mag_x_max)
+          mag_x_max = mag_x_temp;
+        if(mag_y_temp < mag_y_min)
+          mag_y_min = mag_y_temp;
+        if(mag_y_temp > mag_y_max)
+          mag_y_max = mag_y_temp;
+        calibrate_counter++;
+        format_text(20-calibrate_counter/10, temp); //display time left
+        lcd_display_bottom(temp);
+        
+        if(calibrate_counter > 200)                 //calibration finished
+        {
+          //stop calibration
+          mode = STOP;
+          lcd_display_bottom("Done!");
+          servo_direction(60);
+          motor_init(0);
+          //calculate offset
+          mag_x_offset = (mag_x_max + mag_x_min)/2;
+          mag_y_offset = (mag_y_max + mag_y_min)/2;
+          //store calibration in eeprom
+          while(0==eeprom_skryf(0x50, 0, (char)(mag_x_offset>>8)));
+          while(0==eeprom_skryf(0x50, 1, (char)(mag_x_offset&0xFF)));
+          while(0==eeprom_skryf(0x50, 2, (char)(mag_y_offset>>8)));
+          while(0==eeprom_skryf(0x50, 3, (char)(mag_y_offset&0xFF)));
+         
+        }
+      }
     }
+
+  	//check for if command has been completed
+  	if(distance_recieved>required_distance&&mode == RUN)
+    {
+        //get new command
+        distance_recieved = 0;
+        while(0==eeprom_lees(0x50, eeprom_pos, &temp1));
+        eeprom_pos++;
+        if(temp1 == 0)  //end of commands
+        {
+          mode = STOP;
+          motor_init(0);
+          servo_direction(60);
+          lcd_display_bottom("Complete");
+          eeprom_pos--;
+        }
+        else
+        {
+            //read motor speed
+            motor_init(temp1);
+            //read distance
+            while(0==eeprom_lees(0x50, eeprom_pos, &temp1));
+            eeprom_pos++;
+            while(0==eeprom_lees(0x50, eeprom_pos, &temp2));
+            eeprom_pos++;
+            required_distance = (temp1 + 128*temp2)*1.2;
+            //check if forward of backwards
+            while(0==eeprom_lees(0x50, eeprom_pos, &temp1));
+            while(0==eeprom_lees(0x50, eeprom_pos+2, &temp2));
+            eeprom_pos++;
+            if(temp1 == 0xA2 && temp2 != 0xA1)    //direction backwards
+            {
+              servo_init(0);    //direction straight
+              pd5_4 = 1;              
+              p5_4 = 1;               //motor direction backwards
+            }
+            else      //else direction forwards
+            {
+              pd5_4 = 1;              
+              p5_4 = 0;               //motor direction forwards
+              while(0==eeprom_lees(0x50, eeprom_pos, &temp2));
+              eeprom_pos = eeprom_pos + 2;
+              ref_angle = temp1 + 128*temp2 - 180;
+            }
+        }
+	  }
+  	// scroll LCD
+  	if(1 == halfsec)
+  	{ lcd_scroll();
+  	  halfsec=0;
+  	}
+
+	// receive serial message, process it using switch case
+	if(serial1_message_ready != 0 && mode == STOP)
+	{ 
+    serial1_message_ready = 0;
+    switch (serial1_message) 
+    {
+      case 0x80:    //clear lcd
+      lcd_display_top("");
+      lcd_display_bottom("");
+      break;
+      
+      case 0x81:    //display message top line lcd
+      buffer[buffer_pos] = 0;
+      lcd_display_top(buffer);
+      buffer_pos = 0;
+      break;
+      
+      case 0x8A:   //transmit distance interrupt counter over serial
+      format_text(distance_recieved, temp);
+      serial_transmit(temp);
+      break;
+      
+      case 0x8B:    //motor command
+      if(buffer[0] == 0x01)
+      {
+        pd5_4 = 1;              
+        p5_4 = 0;               //motor direction forward
+        motor_init((int)buffer[1]);
+        buffer_pos = 0;
+      }
+      else
+      {
+        pd5_4 = 1;              
+        p5_4 = 1;               //motor direction backwards
+        motor_init((int)buffer[1]);
+        buffer_pos = 0;
+      }
+      break;
+      
+      case 0x8C:      //servo direction command
+      servo_direction((int)buffer[0]);
+      buffer_pos = 0;
+      break;
+      
+      case 0x8D:      //obstacle serial transmit
+      pd5_3 = 1;
+      p5_3 = 1;			    	//enable obstable sensors
+      prc2 = 1;           //disable LCD
+      pd0_6 = 1;
+      p0_6 = 0;   
+      prc2 = 1;
+      pd0 = pd0&0xF0;
+      serial_byte_transmit(~(p0&0x0F));
+      break;
+      
+      case 0x8E:        //transmit angle
+      mag_x_def = mag_x_tot - mag_x_offset;
+      mag_y_def = mag_y_tot - mag_y_offset;
+      mag_angle = get_angle(mag_x_def, mag_y_def);
+      format_text((int)mag_angle, temp);
+      serial_transmit(temp);      
+      break;
+      
+      case 0xA0:       //start to recieve instructions
+      mode = DATA;
+      lcd_display_top("Data Rec");
+      break;
+      
+      default:
+      buffer[buffer_pos++] = serial1_message;
+      break;      
+    }
+  }
+  // receiving instructions
+  if(serial1_message_ready != 0 && mode == DATA)
+  {
+    serial1_message_ready = 0;
+    switch(serial1_message)
+    {
+      case 0xA3:    //put code into eeprom
+      mode == STOP;
+      for(i = 0; i<buffer_pos; i++)
+      {
+        while(0==eeprom_skryf(0x50, i+4, buffer[i]));
+      }
+      while(!eeprom_skryf(0x50, i+4, 0));
+      lcd_display_bottom("Done!");
+      break;
+      
+      default:    //put code into buffer
+      buffer[buffer_pos++] = serial1_message;
+      break;
+    }
+  }
   }
 }
      
